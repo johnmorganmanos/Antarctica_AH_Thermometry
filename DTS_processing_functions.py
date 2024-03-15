@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 # %matplotlib widget
 import numpy as np
+from tqdm import tqdm
 import scipy.stats as st 
 from scipy import signal
 import scipy
@@ -748,12 +749,13 @@ def greens_generator_v4(borehole_proc,
 
     steady_state = m.T
     arr = np.zeros((nz, len(temp_input)))
-
-    for k, surface_temp in enumerate(temp_input):
+    m.flags.append('save_all')
+    m.flags.pop(0) #pop verbose so it doesnt print every iteration
+    for k, surface_temp in tqdm(enumerate(temp_input)):
 
         # Run the model
+
         m.Ts_s = surface_temp+Ts
-        m.flags.append('save_all')
         m.numerical_transient()
         arr[:,k] = m.T
         if np.isnan(m.T).any():
@@ -840,9 +842,11 @@ def foreword_modeler(borehole_proc,
     steady_state = m.T
     if model_timeseries == True:
         if any(timeseries_toModel):
-        
+            
+            #adjust the time series to the mean temp at the surface
+            adjusted_timeseries = timeseries_toModel + Ts
             # Run the model
-            m.Ts_s = timeseries_toModel
+            m.Ts_s = adjusted_timeseries
             m.flags.append('save_all')
             m.numerical_transient()
 
