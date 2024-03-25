@@ -9,7 +9,7 @@ import scipy
 from scipy.signal import detrend
 import glob
 from numpy.linalg import lstsq
-
+import math
 import os
 
 from dtscalibration import read_silixa_files
@@ -155,7 +155,8 @@ def borehole_data_reader(data_dict,
     
     H=x.values[-1] - x.values[0]#ice thickness
     Ts = Ts_all[0].values
-    return x, y, mean, ci95, ci05, qgeo, H, Ts
+    anomaly = np.mean(y - Ts_all, axis=1)
+    return x, y, mean, ci95, ci05, qgeo, H, Ts, anomaly
 
 
 ### Updated Greens Function generator ###
@@ -201,7 +202,7 @@ def greens_generator_v4(borehole_proc,
             H=H,
             qgeo=qgeo,
             p=1000.,
-            dS=10,
+            dS=0,
             nz=nz,
             tol=tol)
     if start_at_zero == True:
@@ -215,7 +216,7 @@ def greens_generator_v4(borehole_proc,
             p=1000.,
             nz=nz,
             tol=tol)
-    # Set the time step to 5 years and subsample the paleoclimate data to match
+
     m.ts = year*const.spy
     m.adot_s = np.asarray([adot]*len(year))/const.spy
 
@@ -240,7 +241,7 @@ def greens_generator_v4(borehole_proc,
 
     m.source_terms()
     m.stencil()
-
+        
     m.numerical_to_steady_state()
 
     if np.isnan(m.T).any():
@@ -265,6 +266,7 @@ def greens_generator_v4(borehole_proc,
 
 def foreword_modeler(borehole_proc,
                      timeseries_toModel = None,
+                     new_qgeo = None,
                      tmin=1923,
                      tmax=2023,
                      t_steps=100,
@@ -273,7 +275,8 @@ def foreword_modeler(borehole_proc,
                      tol=1e-2,
                      include_mechanics=False,
                      start_at_zero=False,
-                     model_timeseries = False
+                     model_timeseries = False,
+                     qgeo_update = False
                     ):
     adot = -0.01 #accumulation rate
     year = np.linspace(tmin,tmax, num_steps)
@@ -281,7 +284,12 @@ def foreword_modeler(borehole_proc,
     qgeo = borehole_proc[5]
     step_func_len = num_steps / t_steps #please make this a whole number
     z = np.linspace(0,H, nz)
-
+    
+    if qgeo_update == True:
+        if new_qgeo == None:
+            raise Exception('Please give a value for qgeo_update!')
+        else:
+            qgeo = new_qgeo
     
     if start_at_zero == False:
         Ts = borehole_proc[7]
@@ -293,7 +301,7 @@ def foreword_modeler(borehole_proc,
             H=H,
             qgeo=qgeo,
             p=1000.,
-            dS=10,
+            dS=0.,
             nz=nz,
             tol=tol)
     if start_at_zero == True:
@@ -332,13 +340,14 @@ def foreword_modeler(borehole_proc,
 
     m.source_terms()
     m.stencil()
-
+    m.flags.pop(0) #pop verbose so it doesnt print every iteration
     m.numerical_to_steady_state()
 
     if np.isnan(m.T).any():
         raise Exception('NaN introduced during steady state. Check nz and timesteps.')
 
     steady_state = m.T
+#     m.flags.pop(0) #pop verbose so it doesnt print every iteration
     if model_timeseries == True:
         if any(timeseries_toModel):
             
@@ -370,10 +379,11 @@ def brown_noise(length, alpha=1):
     # Normalize to have unit standard deviation
     return scaled / np.std(scaled)
 
-def inverser_SVD(greensFunction, 
-             boreholeTemp,
-             p=4,
-             detrend_arr = False):
+def inverser_SVD(greensFunction,
+                 boreholeTemp,
+                 p=4, 
+                 nz=100,
+                 detrend_arr = False):
     
 
     if detrend_arr == True:
@@ -403,10 +413,11 @@ def inverser_SVD(greensFunction,
             m_est = g_inv @ boreholeTemp
         if detrend_arr == True:
             m_est = g_inv @ detrend(boreholeTemp)
-    if boreholeTemp.shape[0] != g_inv.shape[1]:
+    elif boreholeTemp.shape[0] != g_inv.shape[1]:
         #Resample by 
         #mean_resamp = scipy.signal.resample(mean,greens.shape[0],window=10)
-        x = np.linspace(0, len(boreholeTemp)*.256,.256)
+        x = np.linspace(0, len(boreholeTemp)*.256,len(boreholeTemp))
+        boreholeTemp = boreholeTemp.reshape((len(boreholeTemp),))
         f = scipy.interpolate.interp1d(x, boreholeTemp)
         resamp_x = np.linspace(0, x[-1], nz)
         y_resamp = f(resamp_x)
@@ -415,29 +426,69 @@ def inverser_SVD(greensFunction,
         if detrend_arr == True:
             m_est = g_inv @ detrend(y_resamp)
 
-    return m_est
+    return m_est, u_p, s_p, vh_p
 
 
-def inverser_LS(greensFunction, data, detrend_arr = False):
+def inverser_LS(greensFunction, data, nz = 10, detrend_arr = False):
     # greensFunction: Our Greens function
     # data: borehole temperature. Make sure this has same dimension as greensFunction
-    if detrend_arr == True:
-        m_est = lstsq(detrend(greensFunction, axis=1), data)[0]
-    else:
-        m_est = lstsq(greensFunction, data)[0]
+    if data.shape[0] == greensFunction.shape[1]:
+        if detrend_arr == False:
+            m_est = lstsq(greensFunction, data)[0]
+        if detrend_arr == True:
+            m_est = lstsq(detrend(greensFunction, axis=1), data)[0]
+    if data.shape[0] != greensFunction.shape[1]:
+        #Resample by 
+        #mean_resamp = scipy.signal.resample(mean,greens.shape[0],window=10)
+        x = np.linspace(0, len(data)*.256,len(data))
+        data = data.reshape((len(data),))
+        f = scipy.interpolate.interp1d(x, data)
+        resamp_x = np.linspace(0, x[-1], nz)
+        y_resamp = f(resamp_x)
+        if detrend_arr == True:
+            m_est = lstsq(detrend(greensFunction, axis=1), y_resamp)[0]
+        else:
+            m_est = lstsq(greensFunction, y_resamp)[0]
     return m_est
 
 def temp_timeSeries_creator(freq =1, 
-                            amp = -30, 
-                            trend_amptmin = 0.02, 
+                            phase = 0,
+                            amp = -30,
+                            long_term = -45, #We dont really need this since, we use surface temp in foreword model.
+                            trend_amp = 0.02, 
                             tmin = 1923, 
                             tmax = 2023, 
                             num_steps= 100):
     t = np.linspace(tmin, tmax,num_steps)
     trend = (t-tmin) * trend_amp
-    temp = amp*np.sin(2*np.pi*t * freq) + trend
+    temp = long_term + amp*np.sin(2*np.pi*t * freq) + trend
     
     return temp
+
+
+def likelihood(real_borehole,modeled_borehole,sigma):
+
+    mae = np.sum(np.absolute(real_borehole - modeled_borehole))
+    return np.exp(-mae**2/sigma**2 / 2) / np.sqrt(2*np.pi) / sigma     
     
-    
-    
+def greens_generator_efc(borehole_proc,
+                         tmin = 1923, 
+                         tmax = 2023, 
+                         nz = 11, 
+                         num_steps = 100):
+    k_diff = 1.09e-6 * 3.154e+7 #* ((tmax - tmin) / (num_steps)) #seconds
+    H = borehole_proc[6]
+    z = np.linspace(0.254,H, nz)
+    t = np.linspace(tmin, tmax,num_steps) - tmin
+    A_jk = np.zeros(shape = (len(z), len(t)-1))
+    A_jk_beltrami = np.zeros(shape = (len(z), len(t)+1))
+    for k in range(len(t) - 1):
+        for j in range(len(z)):
+            #print(t[k])
+            #A_jk[j,k] = (math.erfc(z[j] / (2*np.sqrt(k_diff * t[k])))) - (math.erfc(z[j] / (2*np.sqrt(k_diff * t[k+1]))))
+            A_jk[j,k] = math.erfc(z[j] / (2*np.sqrt(k_diff * t[k]))) - math.erfc(z[j] / (2*np.sqrt(k_diff * t[k+1])))
+
+            # This A_jk is evaluated following Beltrami 
+            A_jk_beltrami[j,k+2] = math.erfc(z[j] / (2*np.sqrt(k_diff * t[k]))) - math.erfc(z[j] / (2*np.sqrt(k_diff * t[k+1])))
+            
+    return A_jk, A_jk_beltrami   
