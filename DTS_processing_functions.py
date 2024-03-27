@@ -275,8 +275,7 @@ def foreword_modeler(borehole_proc,
                      tol=1e-2,
                      include_mechanics=False,
                      start_at_zero=False,
-                     model_timeseries = False,
-                     qgeo_update = False
+                     model_timeseries = False
                     ):
     adot = -0.01 #accumulation rate
     year = np.linspace(tmin,tmax, num_steps)
@@ -285,11 +284,8 @@ def foreword_modeler(borehole_proc,
     step_func_len = num_steps / t_steps #please make this a whole number
     z = np.linspace(0,H, nz)
     
-    if qgeo_update == True:
-        if new_qgeo == None:
-            raise Exception('Please give a value for qgeo_update!')
-        else:
-            qgeo = new_qgeo
+    if new_qgeo is not None:
+        qgeo = new_qgeo
     
     if start_at_zero == False:
         Ts = borehole_proc[7]
@@ -367,6 +363,7 @@ def foreword_modeler(borehole_proc,
     return steady_state, modeled_profile, z
 
 def brown_noise(length, alpha=1):
+    ### Made and adapted from ChatGPT ###
     # Generate white noise
     noise = np.random.randn(length)
     
@@ -492,3 +489,97 @@ def greens_generator_efc(borehole_proc,
             A_jk_beltrami[j,k+2] = math.erfc(z[j] / (2*np.sqrt(k_diff * t[k]))) - math.erfc(z[j] / (2*np.sqrt(k_diff * t[k+1])))
             
     return A_jk, A_jk_beltrami   
+
+def foreword_modeler_v2(t,
+                        z,
+                        Ts=0,
+                        timeseries_toModel = None,
+                        new_qgeo = None,
+                         tol=1e-2,
+                         include_mechanics=False,
+                         start_at_zero=False,
+                         model_timeseries = False
+                        ):
+    adot = 0
+    year = t
+    H = z[-1]
+    qgeo = 0.046
+    nz=len(z)
+    
+    if new_qgeo is not None:
+        qgeo = new_qgeo
+        
+    if start_at_zero == False:
+        # Instantiate the model class
+        m = ice_temperature(
+            Ts=Ts,
+            adot=adot,
+            H=H,
+            qgeo=qgeo,
+            p=1000.,
+            dS=0.,
+            nz=nz,
+            tol=tol)
+    if start_at_zero == True:
+        Ts = 0.
+        # Instantiate the model class
+        m = ice_temperature(
+            Ts=Ts,
+            adot = 0.,
+            qgeo=0.,
+            H=H,
+            p=1000.,
+            nz=nz,
+            tol=tol)
+    # Set the time step to 5 years and subsample the paleoclimate data to match
+    m.ts = year*const.spy
+    m.adot_s = np.asarray([adot]*len(year))/const.spy
+
+    if include_mechanics == True:
+        # Set velocity terms
+        m.Udef=0.
+        m.Uslide=0.2/const.spy
+
+        # Longitudinal advection forcing
+
+        m.dTs = 0
+        m.dH = 0.3
+        m.da = 0.
+        m.flags.append('long_advection')
+
+        # Thermal conductivity should be temperature and density dependent; set here
+        m.flags.append('temp-dependent')
+    m.initial_conditions()
+
+
+    # Initialize the model to steady state
+
+    m.source_terms()
+    m.stencil()
+    #m.flags.pop(0) #pop 'verbose'
+    m.numerical_to_steady_state()
+
+    if np.isnan(m.T).any():
+        raise Exception('NaN introduced during steady state. Check nz and timesteps.')
+
+    steady_state = m.T
+#     m.flags.pop(0) #pop verbose so it doesnt print every iteration
+    if model_timeseries == True:
+        if any(timeseries_toModel):
+            
+            #adjust the time series to the mean temp at the surface
+            adjusted_timeseries = timeseries_toModel + Ts
+            # Run the model
+            m.Ts_s = adjusted_timeseries
+            m.flags.append('save_all')
+            m.numerical_transient()
+
+            modeled_profile = m.T
+        else:
+            raise Exception('Please include a time series to model!')
+    elif model_timeseries == False:
+        modeled_profile = None
+
+    return steady_state, modeled_profile
+
+
