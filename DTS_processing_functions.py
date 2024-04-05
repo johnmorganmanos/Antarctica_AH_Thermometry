@@ -12,8 +12,6 @@ from numpy.linalg import lstsq
 import math
 import os
 
-from dtscalibration import read_silixa_files
-
 import warnings
 
 from dtscalibration import read_silixa_files
@@ -130,7 +128,8 @@ def borehole_data_reader(data_dict,
                                               geometry[borehole_name][2])).x - geometry[borehole_name][0]
     y = data_dict[borehole_name].sel(x=slice(geometry[borehole_name][0],
                                               geometry[borehole_name][2])).tmpw
-        
+    alpha = data_dict[borehole_name].sel(x=slice(geometry[borehole_name][0],
+                                              geometry[borehole_name][2])).alpha
     if y.shape[1] == 1:
         mean = y
         ci95 = None
@@ -156,7 +155,9 @@ def borehole_data_reader(data_dict,
     H=x.values[-1] - x.values[0]#ice thickness
     Ts = Ts_all[0].values
     anomaly = np.mean(y - Ts_all, axis=1)
-    return x, y, mean, ci95, ci05, qgeo, H, Ts, anomaly
+    
+
+    return x, y, mean, ci95, ci05, qgeo, H, Ts, anomaly, alpha
 
 
 ### Updated Greens Function generator ###
@@ -581,5 +582,62 @@ def foreword_modeler_v2(t,
         modeled_profile = None
 
     return steady_state, modeled_profile
+
+def DJ_foreword(H=200,
+                Tsurf=-31, 
+                time_steps=100):
+    tmin = 0
+    tmax = 2023
+    ts = np.linspace(tmin, tmax, time_steps)
+    
+    adot = -0.01 #m/yr
+    # Instantiate the model class
+    m = ice_temperature(Ts=Tsurf,adot=adot,H=H,qgeo=0.046,p=1000.,dS=0)
+
+    # Set the time steps and foreword data to match
+    m.ts = ts*const.spy
+    m.adot_s = np.array([adot]*len(ts))/const.spy # constant accumulation rate
+    m.Ts_s = np.array([Tsurf]*len(ts)) #constant temperature 
+    
+    # Set velocity terms
+    m.Udef=0.
+    m.Uslide=0.10/const.spy
+
+    # Longitudinal advection forcing
+    m.dTs = 1.7e-10
+    m.dH = 0.01
+    m.da = 0/const.spy
+    m.flags.append('long_advection')
+
+    # Thermal conductivity should be temperature and density dependent; set here
+    m.flags.append('temp-dependent')
+    m.initial_conditions()
+    # rho_interpolator = interp1d(m.H-z_rho,rho_data,fill_value='extrapolate')
+    # m.rho = 1000.*rho_interpolator(m.z)
+    # m.k = conductivity(m.T.copy(),m.rho)
+    # m.Cp = heat_capacity(m.T.copy())
+    # Initialize the model to steady state
+    m.source_terms()
+    m.stencil()
+    m.numerical_to_steady_state()
+    if np.isnan(m.T).any():
+        raise Exception('NaN introduced during steady state. Check nz and timesteps.')
+
+
+    # Run the model
+    m.flags.append('save_all')
+    m.numerical_transient()
+    
+    return m.T, m.z
+
+# Function to organize the Greens Function
+def get_G(i):
+    
+    delta = tsurf_avg*np.ones(number_of_time_steps)
+    delta[i] =  1
+
+    U,t,z = heat(delta,tmax=end_year,tmin=start_year,nt=number_of_time_steps,zmax=max_depth,
+            dTdz=dTdz,nz=(nz-1))
+    return U[:,-1]
 
 
